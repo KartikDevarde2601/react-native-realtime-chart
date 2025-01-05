@@ -2,26 +2,18 @@ import {
   Canvas,
   Group,
   Path,
-  SkPath,
   Skia,
   Text,
   matchFont,
   rect
 } from '@shopify/react-native-skia';
-import {
-  ScaleLinear,
-  ScaleTime,
-  curveBasis,
-  line,
-  scaleLinear,
-  scaleTime
-} from 'd3';
+import { curveBasis, line, scaleLinear, scaleTime } from 'd3';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Dimensions, StyleSheet, View } from 'react-native';
-import { useSharedValue } from 'react-native-reanimated';
+import { runOnUI, useSharedValue } from 'react-native-reanimated';
 
-const [width, height] = [Dimensions.get('screen').width - 10, 400];
+const [width, height] = [Dimensions.get('screen').width - 10, 300];
 const [timeSlots, fps] = [40, 60];
 
 type DataPoint = {
@@ -45,40 +37,16 @@ const generateRandomDateValues = (
   }));
 };
 
-const generateChart = (
-  data: DataPoint[]
-): {
-  curve: SkPath;
-  x: ScaleTime<number, number, never>;
-  y: ScaleLinear<number, number, never>;
-} => {
-  const x = scaleTime().range([0, width]);
-  const y = scaleLinear()
-    .range([height - 20, 20])
-    .domain([0, 100]);
-
-  x.domain([
-    new Date(new Date().getTime() - 1000 * (timeSlots - 2)),
-    new Date(new Date().getTime() - 1000 * 2)
-  ]);
-
-  const l = line<DataPoint>()
-    .x((d) => x(d.date))
-    .y((d) => y(d.value))
-    .curve(curveBasis);
-
-  const path = l(data)!;
-
-  return { curve: Skia.Path.MakeFromSVGString(path)!, x, y };
-};
+// Pre-calculate ticks for y-axis
+const yTicks = [0, 20, 40, 60, 80, 100];
 
 export default function App() {
-  const [data, setData] = useState<DataPoint[]>(
+  const [data1, setData1] = useState<DataPoint[]>(
     generateRandomDateValues(timeSlots)
   );
-  const { curve, y } = generateChart(data);
-  const path = useSharedValue<string>(curve.toSVGString());
-  const yScale = useSharedValue<ScaleLinear<number, number, never>>(y);
+
+  const path = useSharedValue<string>('');
+  const yPoints = useSharedValue<number[]>([]);
 
   const fontStyle = {
     fontFamily: 'Helvetica',
@@ -87,23 +55,58 @@ export default function App() {
   };
   const font = matchFont(fontStyle as any);
 
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setData((state) => {
-        state.shift();
-        state.push({ date: new Date(), value: randomInt() });
-        return state;
-      });
+  // Calculate scales on JS thread
+  const calculatePath = useCallback((currentData: DataPoint[]) => {
+    const xScale = scaleTime()
+      .domain([
+        new Date(new Date().getTime() - (1000 / fps) * (timeSlots - 2)),
+        new Date(new Date().getTime() - (1000 / fps) * 2)
+      ])
+      .range([0, width]);
 
-      return () => clearInterval(interval);
-    }, 1000);
+    const yScale = scaleLinear()
+      .domain([0, 100])
+      .range([height - 20, 20]);
+
+    const l = line<DataPoint>()
+      .x((d) => xScale(d.date))
+      .y((d) => yScale(d.value))
+      .curve(curveBasis);
+
+    const pathData = l(currentData)!;
+    const calculatedYPoints = yTicks.map((tick) => yScale(tick));
+
+    return {
+      pathData,
+      yPoints: calculatedYPoints
+    };
   }, []);
 
+  // Worklet to update shared values
+  const updatePath = useCallback((pathString: string, newYPoints: number[]) => {
+    'worklet';
+    path.value = pathString;
+    yPoints.value = newYPoints;
+  }, []);
+
+  // Initialize and update path
+  useEffect(() => {
+    const { pathData, yPoints: newYPoints } = calculatePath(data);
+    runOnUI(updatePath)(pathData, newYPoints);
+  }, [data, calculatePath, updatePath]);
+
+  // Update data periodically
   useEffect(() => {
     const interval = setInterval(() => {
-      const { curve, x, y } = generateChart(data);
-      yScale.value = y;
-      path.value = curve.toSVGString();
+      setData((currentData) => {
+        const newData = [...currentData];
+        newData.shift();
+        newData.push({
+          date: new Date(),
+          value: randomInt()
+        });
+        return newData;
+      });
     }, 1000 / fps);
 
     return () => clearInterval(interval);
@@ -113,29 +116,31 @@ export default function App() {
     <View style={styles.container}>
       <Canvas style={{ width, height }}>
         <Group>
-          {yScale.value.ticks(6).map((label: number, i: number) => {
-            const yPoint = yScale.value(label);
-            return (
-              <Group key={label + i.toString()}>
-                <Path
-                  color="#090909"
-                  style="stroke"
-                  strokeWidth={2}
-                  path={`M30,${yPoint} L${width},${yPoint}`}
-                />
-                <Text
-                  text={label.toString()}
-                  x={0}
-                  y={yPoint + 5}
-                  color="#474747"
-                  font={font}
-                />
-              </Group>
-            );
-          })}
+          {yPoints.value.map((yPoint, i) => (
+            <Group key={i}>
+              <Path
+                color="#090909"
+                style="stroke"
+                strokeWidth={2}
+                path={`M30,${yPoint} L${width},${yPoint}`}
+              />
+              <Text
+                text={yTicks[i].toString()}
+                x={0}
+                y={yPoint + 5}
+                color="#474747"
+                font={font}
+              />
+            </Group>
+          ))}
         </Group>
         <Group clip={rect(30, 0, width, height)}>
-          <Path style="stroke" strokeWidth={2} color="#fff" path={path} />
+          <Path
+            style="stroke"
+            strokeWidth={2}
+            color="#fff"
+            path={Skia.Path.MakeFromSVGString(path.value) || Skia.Path.Make()}
+          />
         </Group>
       </Canvas>
       <StatusBar style="auto" />
