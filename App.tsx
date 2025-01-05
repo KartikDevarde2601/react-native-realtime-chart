@@ -41,7 +41,7 @@ const generateRandomDateValues = (
 const yTicks = [0, 20, 40, 60, 80, 100];
 
 export default function App() {
-  const [data1, setData1] = useState<DataPoint[]>(
+  const [data, setData] = useState<DataPoint[]>(
     generateRandomDateValues(timeSlots)
   );
 
