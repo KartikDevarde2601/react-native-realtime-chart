@@ -9,7 +9,7 @@ import {
 } from '@shopify/react-native-skia';
 import { curveBasis, line, scaleLinear, scaleTime } from 'd3';
 import { StatusBar } from 'expo-status-bar';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Dimensions, StyleSheet, View } from 'react-native';
 import { runOnUI, useSharedValue } from 'react-native-reanimated';
 
@@ -20,9 +20,8 @@ const totalHeight = graphHeight * 2 + gapBetweenGraphs;
 const [timeSlots, fps] = [40, 60];
 
 type DataPoint = {
-  date: Date;
   value: number;
-  timestamp: number; // Added for synchronization
+  timestamp: Date;
 };
 
 const randomInt = (min: number = 0, max: number = 100): number => {
@@ -36,11 +35,9 @@ const generateRandomDateValues = (
   fromDate: Date = new Date()
 ): DataPoint[] => {
   return Array.from(Array(n).keys()).map((_, i) => {
-    const date = new Date(fromDate.getTime() - (n - i) * 1000);
     return {
-      date,
       value: randomInt(min, max),
-      timestamp: date.getTime()
+      timestamp: new Date(fromDate.getTime() - n * 1000 + 1000 * i)
     };
   });
 };
@@ -54,16 +51,15 @@ const createBackgroundPath = (width: number, height: number) => {
 };
 
 export default function App() {
-  const [lastUpdateTime, setLastUpdateTime] = useState<number>(Date.now());
-  const animationFrameRef = useRef<number>();
-
   const [tempData, setTempData] = useState<DataPoint[]>(
-    () => generateRandomDateValues(30, 15, 35) // 30 initial points
+    () => generateRandomDateValues(timeSlots) // 30 initial points
   );
 
   const [humidityData, setHumidityData] = useState<DataPoint[]>(
-    () => generateRandomDateValues(30, 30, 80) // 30 initial points
+    () => generateRandomDateValues(timeSlots) // 30 initial points
   );
+
+  console.log('tempData', tempData);
 
   const tempPath = useSharedValue<string>('');
   const humidityPath = useSharedValue<string>('');
@@ -84,111 +80,114 @@ export default function App() {
   const font = matchFont(fontStyle as any);
   const titleFont = matchFont(titleFontStyle as any);
 
-  const calculatePath = useCallback(
-    (currentData: DataPoint[], range: [number, number]) => {
-      const xScale = scaleTime()
-        .domain([
-          new Date(Date.now() - (1000 / fps) * (timeSlots - 2)),
-          new Date(Date.now() - (1000 / fps) * 2)
-        ])
-        .range([0, width - 40]);
+  const calculatePath_humidity = useCallback((currentData: DataPoint[]) => {
+    const xScale = scaleTime()
+      .domain([
+        new Date(Date.now() - (1000 / fps) * (timeSlots - 2)),
+        new Date(Date.now() - (1000 / fps) * 2)
+      ])
+      .range([0, width]);
 
-      const yScale = scaleLinear()
-        .domain(range)
-        .range([graphHeight - 40, 20]);
+    const yScale = scaleLinear()
+      .domain([0, 100])
+      .range([graphHeight - 20, 20]);
 
-      const l = line<DataPoint>()
-        .x((d) => xScale(d.date))
-        .y((d) => yScale(d.value))
-        .curve(curveBasis);
+    const l = line<DataPoint>()
+      .x((d) => xScale(d.timestamp))
+      .y((d) => yScale(d.value))
+      .curve(curveBasis);
 
-      const pathData = l(currentData)!;
-      const calculatedYPoints = yTicks.map((tick) =>
-        yScale((tick * (range[1] - range[0])) / 100 + range[0])
-      );
+    const pathData = l(currentData)!;
+    const calculatedYPoints = yTicks.map((tick) => yScale(tick));
 
-      return {
-        pathData,
-        yPoints: calculatedYPoints
-      };
-    },
-    []
-  );
-
-  const updatePath = useCallback(
-    (pathString: string, newYPoints: number[], isTemp: boolean) => {
-      'worklet';
-      if (isTemp) {
-        tempPath.value = pathString;
-        tempYPoints.value = newYPoints;
-      } else {
-        humidityPath.value = pathString;
-        humidityYPoints.value = newYPoints;
-      }
-    },
-    []
-  );
-
-  const updateGraphs = useCallback(() => {
-    const currentTime = Date.now();
-    const timeDiff = currentTime - lastUpdateTime;
-
-    if (timeDiff >= 1000 / fps) {
-      const newTimestamp = Date.now();
-      const newValue = {
-        date: new Date(newTimestamp),
-        value: 0,
-        timestamp: newTimestamp
-      };
-
-      setTempData((currentData) => {
-        const newData = [
-          ...currentData.slice(1),
-          {
-            ...newValue,
-            value: randomInt(15, 35)
-          }
-        ];
-        return newData;
-      });
-
-      setHumidityData((currentData) => {
-        const newData = [
-          ...currentData.slice(1),
-          {
-            ...newValue,
-            value: randomInt(30, 80)
-          }
-        ];
-        return newData;
-      });
-
-      setLastUpdateTime(currentTime);
-    }
-
-    animationFrameRef.current = requestAnimationFrame(updateGraphs);
-  }, [lastUpdateTime]);
-
-  useEffect(() => {
-    const { pathData: tempPathData, yPoints: tempYPoints } = calculatePath(
-      tempData,
-      [15, 35]
-    );
-    const { pathData: humidityPathData, yPoints: humidityYPoints } =
-      calculatePath(humidityData, [30, 80]);
-
-    runOnUI(updatePath)(tempPathData, tempYPoints, true);
-    runOnUI(updatePath)(humidityPathData, humidityYPoints, false);
-  }, [tempData, humidityData]);
-
-  useEffect(() => {
-    animationFrameRef.current = requestAnimationFrame(updateGraphs);
-    return () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
+    return {
+      pathData,
+      yPoints: calculatedYPoints
     };
-  }, [updateGraphs]);
+  }, []);
+
+  const calculatePath_Temperature = useCallback((currentData: DataPoint[]) => {
+    const xScale = scaleTime()
+      .domain([
+        new Date(Date.now() - (1000 / fps) * (timeSlots - 2)),
+        new Date(Date.now() - (1000 / fps) * 2)
+      ])
+      .range([0, width]);
+
+    const yScale = scaleLinear()
+      .domain([0, 100])
+      .range([graphHeight - 20, 20]);
+
+    const l = line<DataPoint>()
+      .x((d) => xScale(d.timestamp))
+      .y((d) => yScale(d.value))
+      .curve(curveBasis);
+
+    const pathData = l(currentData)!;
+    const calculatedYPoints = yTicks.map((tick) => yScale(tick));
+
+    return {
+      pathData,
+      yPoints: calculatedYPoints
+    };
+  }, []);
+
+  const updatePath_temperature = useCallback(
+    (pathString: string, newYPoints: number[]) => {
+      'worklet';
+      tempPath.value = pathString;
+      tempYPoints.value = newYPoints;
+    },
+    []
+  );
+
+  const updatePath_humidity = useCallback(
+    (pathString: string, newYPoints: number[]) => {
+      'worklet';
+      humidityPath.value = pathString;
+      humidityYPoints.value = newYPoints;
+    },
+    []
+  );
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      setHumidityData((prevData) => {
+        const newData = [...prevData];
+        newData.shift();
+        newData.push({
+          value: randomInt(30, 80),
+          timestamp: new Date()
+        });
+        return newData;
+      });
+
+      setTempData((prevData) => {
+        const newData = [...prevData];
+        newData.shift();
+        newData.push({
+          value: randomInt(15, 35),
+          timestamp: new Date()
+        });
+        return newData;
+      });
+    }, 1000 / fps);
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    const { pathData: tempPathData, yPoints: tempYPoints } =
+      calculatePath_Temperature(tempData);
+    const { pathData: humidityPathData, yPoints: humidityYPoints } =
+      calculatePath_humidity(humidityData);
+
+    runOnUI(updatePath_temperature)(tempPathData, tempYPoints);
+    runOnUI(updatePath_humidity)(humidityPathData, humidityYPoints);
+  }, [tempData, humidityData]);
 
   const Graph = ({ path, yPoints, title, yRange, yOffset = 0 }: any) => (
     <Group transform={[{ translateY: yOffset }]}>
